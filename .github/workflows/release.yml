@@ -1,0 +1,90 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: startsWith(github.event.head_commit.message, 'release v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pymupdf msal msal-extensions requests tkinterdnd2 pyinstaller
+
+      - name: Read version
+        id: version
+        run: |
+          $version = python -c "import re, pathlib; m = re.search(r'^__version__\s*=\s*[\x22\x27](\d+\.\d+\.\d+)[\x22\x27]', pathlib.Path('splitter_engine.py').read_text(encoding='utf-8'), re.M); print(m.group(1) if m else '')"
+          if (-not $version) { Write-Error "Could not read __version__ from splitter_engine.py"; exit 1 }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Version $version"
+
+      - name: Check commit message
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $first = ($env:COMMIT_MESSAGE -split "`r?`n")[0]
+          $pattern = '^release v' + [regex]::Escape($env:VERSION) + '(\s|$)'
+          if ($first -notmatch $pattern) { Write-Error "Commit message must start with 'release v$($env:VERSION)' but was '$first'"; exit 1 }
+
+      - name: Check tag
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $existing = git ls-remote --tags origin "refs/tags/v$($env:VERSION)"
+          if ($LASTEXITCODE -ne 0) { Write-Error "git ls-remote failed"; exit 1 }
+          if ($existing) {
+            Write-Host "Tag v$($env:VERSION) already exists; skipping release"
+            "exists=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            "exists=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Generate config
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          NBS_TENANT_ID: ${{ secrets.NBS_TENANT_ID }}
+          NBS_CLIENT_ID: ${{ secrets.NBS_CLIENT_ID }}
+          NBS_WORKSPACE_ID: ${{ secrets.NBS_WORKSPACE_ID }}
+          NBS_DATAFLOW_ID: ${{ secrets.NBS_DATAFLOW_ID }}
+          NBS_DATASET_ID: ${{ secrets.NBS_DATASET_ID }}
+          NBS_BATCH_REPORT_ID: ${{ secrets.NBS_BATCH_REPORT_ID }}
+        run: python scripts/generate_config.py
+
+      - name: Build exe
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          pyinstaller --noconfirm --clean build_splitter.spec
+          if (-not (Test-Path -LiteralPath "dist/NorthBay Claim Splitter.exe")) { Write-Error "dist/NorthBay Claim Splitter.exe was not produced"; exit 1 }
+
+      - name: Publish release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*.exe
+          make_latest: true
+          generate_release_notes: true
