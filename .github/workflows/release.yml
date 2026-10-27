@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pymupdf msal msal-extensions requests tkinterdnd2 pyinstaller
+          python -m pip install pymupdf msal msal-extensions requests tkinterdnd2 openpyxl pyinstaller
 
       - name: Read version
         id: version

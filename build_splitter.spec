@@ -20,6 +20,8 @@ a = Analysis(
         'pbi_client',
         'claims',
         'invoice_pdf',
+        'invoice_xlsx',
+        'openpyxl',
         'updater',
         'msal',
         'msal_extensions',

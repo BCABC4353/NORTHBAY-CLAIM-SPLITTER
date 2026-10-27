@@ -51,6 +51,50 @@ class RunInfo:
     invoice: str
 
 
+@dataclass(frozen=True)
+class InvoiceLine:
+    invoice: str
+    trip_date: str
+    job: str
+    run: str
+    name: str
+    charge: str
+    billed: float
+
+
+_INVOICE_LINES_DAX = """DEFINE
+VAR invs = FILTER(ALL('Batch_History'[InvoiceNumber]), 'Batch_History'[InvoiceNumber] <> "" && PATHCONTAINS(@INVOICE, 'Batch_History'[InvoiceNumber]))
+VAR legs =
+    CALCULATETABLE(
+        ADDCOLUMNS(
+            SUMMARIZE('Batch_History', 'Batch_History'[InvoiceNumber], 'Batch_History'[TripDate], 'Batch_History'[Job]),
+            "BASE", LEFT('Batch_History'[Job], LEN('Batch_History'[Job]) - 2),
+            "LEGBILLED", CALCULATE(SUM('Batch_History'[NetCharges]))
+        ),
+        invs
+    )
+VAR lines =
+    FILTER(
+        GROUPBY(legs, 'Batch_History'[InvoiceNumber], 'Batch_History'[TripDate], [BASE],
+            "BILLED", SUMX(CURRENTGROUP(), [LEGBILLED]),
+            "LEGS", COUNTX(CURRENTGROUP(), 1)),
+        [BILLED] > 0
+    )
+VAR withjob =
+    ADDCOLUMNS(lines, "FIRSTJOB",
+        VAR i = 'Batch_History'[InvoiceNumber]
+        VAR d = 'Batch_History'[TripDate]
+        VAR b = [BASE]
+        RETURN CALCULATE(FIRSTNONBLANK('Batch_History'[Job], 1), 'Batch_History'[InvoiceNumber] = i, 'Batch_History'[TripDate] = d,
+            FILTER(ALL('Batch_History'[Job]), LEFT('Batch_History'[Job], LEN('Batch_History'[Job]) - 2) = b)))
+EVALUATE
+ADDCOLUMNS(withjob,
+    "RUN",   VAR i = 'Batch_History'[InvoiceNumber] VAR d = 'Batch_History'[TripDate] VAR j = [FIRSTJOB] RETURN CALCULATE(FIRSTNONBLANK('Batch_History'[RunNumber], 1), 'Batch_History'[InvoiceNumber] = i, 'Batch_History'[TripDate] = d, 'Batch_History'[Job] = j),
+    "NAME",  VAR i = 'Batch_History'[InvoiceNumber] VAR d = 'Batch_History'[TripDate] VAR j = [FIRSTJOB] RETURN CALCULATE(FIRSTNONBLANK('Batch_History'[CustomerName], 1), 'Batch_History'[InvoiceNumber] = i, 'Batch_History'[TripDate] = d, 'Batch_History'[Job] = j),
+    "LEVEL", VAR i = 'Batch_History'[InvoiceNumber] VAR d = 'Batch_History'[TripDate] VAR j = [FIRSTJOB] RETURN CALCULATE(FIRSTNONBLANK('Batch_History'[CHARGE], 1), 'Batch_History'[InvoiceNumber] = i, 'Batch_History'[TripDate] = d, 'Batch_History'[Job] = j)
+)"""
+
+
 def _token_cache():
     os.makedirs(config.APP_DATA_DIR, exist_ok=True)
     path = os.path.join(config.APP_DATA_DIR, "token_cache.bin")
@@ -269,31 +313,34 @@ class PbiClient:
                 detail = mine[0].get("serviceExceptionJson") or status
                 raise RefreshFailedError("dataset", str(detail)[:300])
 
-    def invoice_lookup(self) -> dict[str, list[RunInfo]]:
-        dax = (
-            "EVALUATE SUMMARIZE(FILTER('Batch_History', 'Batch_History'[InvoiceNumber] <> \"\"), "
-            "'Batch_History'[RunNumber], 'Batch_History'[TripDate], 'Batch_History'[Job], "
-            "'Batch_History'[InvoiceNumber])"
-        )
+    def _query(self, dax: str, what: str) -> list[dict]:
         resp = self._req(
             "POST",
             f"groups/{config.WORKSPACE_ID}/datasets/{config.DATASET_ID}/executeQueries",
             json={"queries": [{"query": dax}], "serializerSettings": {"includeNulls": True}},
         )
         if not resp.ok:
-            raise PbiError(f"Invoice lookup failed: {_error_summary(resp)}")
+            raise PbiError(f"{what} failed: {_error_summary(resp)}")
         try:
             result = resp.json()["results"][0]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise PbiError("Invoice lookup failed: unexpected response shape.") from exc
+            raise PbiError(f"{what} failed: unexpected response shape.") from exc
         err = result.get("error")
         if err:
             code = err.get("code") if isinstance(err, dict) else ""
-            raise PbiError(f"Invoice lookup failed: {code or 'query error'}")
+            raise PbiError(f"{what} failed: {code or 'query error'}")
         try:
-            rows = result["tables"][0]["rows"]
+            return result["tables"][0]["rows"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise PbiError("Invoice lookup failed: unexpected response shape.") from exc
+            raise PbiError(f"{what} failed: unexpected response shape.") from exc
+
+    def invoice_lookup(self) -> dict[str, list[RunInfo]]:
+        dax = (
+            "EVALUATE SUMMARIZE(FILTER('Batch_History', 'Batch_History'[InvoiceNumber] <> \"\"), "
+            "'Batch_History'[RunNumber], 'Batch_History'[TripDate], 'Batch_History'[Job], "
+            "'Batch_History'[InvoiceNumber])"
+        )
+        rows = self._query(dax, "Invoice lookup")
         out: dict[str, list[RunInfo]] = {}
         for r in rows:
             run = str(r.get("Batch_History[RunNumber]") or "").strip()
@@ -306,6 +353,31 @@ class PbiClient:
                 invoice=str(r.get("Batch_History[InvoiceNumber]") or ""),
             )
             out.setdefault(run.replace("-", ""), []).append(info)
+        return out
+
+    def invoice_lines(self, invoices: list[str]) -> dict[str, list[InvoiceLine]]:
+        joined = "|".join(invoices).replace('"', '""')
+        rows = self._query(_INVOICE_LINES_DAX.replace("@INVOICE", f'"{joined}"'), "Invoice line lookup")
+        out: dict[str, list[InvoiceLine]] = {inv: [] for inv in invoices}
+        for r in rows:
+            invoice = str(r.get("Batch_History[InvoiceNumber]") or "").strip()
+            try:
+                billed = float(r.get("[BILLED]") or 0)
+            except (TypeError, ValueError) as exc:
+                raise PbiError(f"Invoice line lookup failed: bad amount on {invoice}.") from exc
+            out.setdefault(invoice, []).append(
+                InvoiceLine(
+                    invoice=invoice,
+                    trip_date=str(r.get("Batch_History[TripDate]") or ""),
+                    job=str(r.get("[FIRSTJOB]") or ""),
+                    run=str(r.get("[RUN]") or "").strip(),
+                    name=str(r.get("[NAME]") or "").strip(),
+                    charge=str(r.get("[LEVEL]") or "").strip(),
+                    billed=billed,
+                )
+            )
+        for lines in out.values():
+            lines.sort(key=lambda line: (line.trip_date, line.job))
         return out
 
     def export_invoices(self, invoices: list[str]) -> bytes:

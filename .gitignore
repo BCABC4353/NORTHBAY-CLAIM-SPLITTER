@@ -1,5 +1,7 @@
 *.pdf
 *.PDF
+*.xlsx
+*.XLSX
 *.log
 docs/
 setup/*.rdl

@@ -10,9 +10,10 @@ import fitz
 import config
 from claims import format_run, page_runs
 from invoice_pdf import InvoicePdfError, read_sections
-from pbi_client import PbiClient, RunInfo
+from invoice_xlsx import build_summary
+from pbi_client import InvoiceLine, PbiClient, RunInfo
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +80,56 @@ class CollateResult:
     claims_missing: list[str] = field(default_factory=list)
 
 
-def _output_path(input_path: str, suffix: str) -> str:
+def _output_path(input_path: str, suffix: str, ext: str = ".pdf") -> str:
     base_dir = os.path.dirname(os.path.abspath(input_path))
     stem, _ = os.path.splitext(os.path.basename(input_path))
-    return os.path.join(base_dir, f"{stem}-{suffix}.pdf")
+    return os.path.join(base_dir, f"{stem}-{suffix}{ext}")
+
+
+def _existing_outputs(input_path: str, suffixes) -> list[str]:
+    return [
+        p
+        for s in suffixes
+        for p in (_output_path(input_path, s), _output_path(input_path, s, ".xlsx"))
+        if os.path.exists(p)
+    ]
+
+
+def _line_mismatches(invoice: str, lines: list[InvoiceLine], printed_runs: list[str]) -> list[str]:
+    data_runs = [line.run for line in lines]
+    if data_runs == printed_runs:
+        return []
+    problems = [f"{invoice}: the PDF shows {len(printed_runs)} lines, the invoice data has {len(data_runs)}"]
+    for n, (printed, data) in enumerate(zip(printed_runs, data_runs), start=1):
+        if printed != data:
+            problems.append(f"{invoice} line {n}: PDF {printed}, data {data or '(no run)'}")
+            break
+    return problems
+
+
+def _pdf_writer(parts: list[tuple[fitz.Document, int]]) -> Callable[[str], None]:
+    def write(tmp_path: str) -> None:
+        out_doc = fitz.open()
+        try:
+            for doc, page in parts:
+                out_doc.insert_pdf(doc, from_page=page, to_page=page)
+            out_doc.save(tmp_path)
+        finally:
+            out_doc.close()
+        with fitz.open(tmp_path) as verify:
+            actual = len(verify)
+        if actual != len(parts):
+            raise OutputCorruptError(tmp_path, len(parts), actual)
+
+    return write
+
+
+def _bytes_writer(data: bytes) -> Callable[[str], None]:
+    def write(tmp_path: str) -> None:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+
+    return write
 
 
 def _token_key(run: str) -> str:
@@ -154,29 +201,19 @@ def _order_claims(
     return [t for _, t in ranked], unprinted, missing
 
 
-def _write_outputs(planned: list[tuple[str, list[tuple[fitz.Document, int]]]]) -> list[str]:
+def _write_outputs(planned: list[tuple[str, Callable[[str], None]]]) -> list[str]:
     written_tmps: list[str] = []
     committed: list[tuple[str, str | None]] = []
     finals: list[str] = []
     try:
-        for final_path, parts in planned:
+        for final_path, write in planned:
             tmp_path = final_path + ".tmp"
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
-            out_doc = fitz.open()
-            try:
-                for doc, page in parts:
-                    out_doc.insert_pdf(doc, from_page=page, to_page=page)
-                out_doc.save(tmp_path)
-            finally:
-                out_doc.close()
             written_tmps.append(tmp_path)
-            with fitz.open(tmp_path) as verify:
-                actual = len(verify)
-            if actual != len(parts):
-                raise OutputCorruptError(tmp_path, len(parts), actual)
+            write(tmp_path)
 
-        for final_path, parts in planned:
+        for final_path, _write in planned:
             tmp_path = final_path + ".tmp"
             bak_path: str | None = None
             if os.path.exists(final_path):
@@ -199,7 +236,7 @@ def _write_outputs(planned: list[tuple[str, list[tuple[fitz.Document, int]]]]) -
                 raise
             committed.append((final_path, bak_path))
             finals.append(final_path)
-            logger.info("Wrote %s (%d pages)", os.path.basename(final_path), len(parts))
+            logger.info("Wrote %s", os.path.basename(final_path))
 
         for _final, bak in committed:
             if bak is not None:
@@ -242,9 +279,7 @@ def collate_pdf(
     size_bytes = os.path.getsize(input_path)
 
     if not overwrite:
-        existing = [
-            p for p in (_output_path(input_path, s) for s in config.SUFFIX_ORDER) if os.path.exists(p)
-        ]
+        existing = _existing_outputs(input_path, config.SUFFIX_ORDER)
         if existing:
             raise OutputExistsError(existing)
 
@@ -310,9 +345,7 @@ def collate_pdf(
         invoices = {s: next(iter(by_suffix[s])) for s in config.SUFFIX_ORDER if s in by_suffix}
 
         if not overwrite:
-            existing = [
-                p for p in (_output_path(input_path, s) for s in invoices) if os.path.exists(p)
-            ]
+            existing = _existing_outputs(input_path, invoices)
             if existing:
                 raise OutputExistsError(existing)
 
@@ -325,15 +358,28 @@ def collate_pdf(
             except InvoicePdfError as exc:
                 raise CollationError(str(exc), exc.items) from exc
 
+            on_status("Reading the invoice lines for the spreadsheets...")
+            invoice_lines = client.invoice_lines(list(invoices.values()))
+            mismatches = [
+                p for inv in invoices.values()
+                for p in _line_mismatches(inv, invoice_lines.get(inv, []), sections[inv].runs)
+            ]
+            if mismatches:
+                raise CollationError("The spreadsheet lines do not match the invoice PDF.", mismatches)
+
             result = CollateResult(input_path=input_path, total_pages=total_pages, invoices=invoices)
-            planned: list[tuple[str, list[tuple[fitz.Document, int]]]] = []
+            planned: list[tuple[str, Callable[[str], None]]] = []
             for suffix, invoice in invoices.items():
                 section = sections[invoice]
                 suffix_tokens = [t for t in claims if invoice_of[t] == invoice]
                 ordered, unprinted, missing = _order_claims(suffix_tokens, claims, section.runs, lookup)
                 parts = [(inv_doc, p) for p in section.pages]
                 parts += [(src, p) for t in ordered for p in claims[t]]
-                planned.append((_output_path(input_path, suffix), parts))
+                planned.append((_output_path(input_path, suffix), _pdf_writer(parts)))
+                planned.append((
+                    _output_path(input_path, suffix, ".xlsx"),
+                    _bytes_writer(build_summary(invoice, invoice_lines[invoice])),
+                ))
                 result.invoice_pages[suffix] = len(section.pages)
                 result.claim_pages[suffix] = len(parts) - len(section.pages)
                 result.unprinted_runs += unprinted

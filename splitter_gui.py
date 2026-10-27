@@ -408,6 +408,7 @@ class SplitterApp(_BaseApp):  # type: ignore[misc]  # dynamic base; _BaseApp res
             "  -NBC: NORTHBAY invoice (ALS/BLS/CCT/GURNEY/MCC/NEONATE)\n"
             "  -TX: NORTHBAY-WHA TRANSFER invoice\n"
             "  -911: NORTHBAY-WHA 911 invoice\n\n"
+            "Each PDF gets a matching .xlsx claims summary.\n"
             "Output files land next to the input PDF.",
         )
 
