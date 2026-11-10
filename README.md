@@ -5,8 +5,8 @@ A Windows desktop tool for NorthBay billing. Drop a RescueNet CMS-1500 batch PDF
 1. Refreshes the invoice data in Power BI.
 2. Sorts the 1500 pages by the run number in box 26 into NBC, TX and 911 groups.
 3. Exports the matching NorthBay invoices.
-4. Writes `<name>-NBC.pdf`, `<name>-TX.pdf` and `<name>-911.pdf` next to the input, each with its invoice on top and the 1500s in invoice line order.
-5. Writes a matching `<name>-NBC.xlsx`, `<name>-TX.xlsx` and `<name>-911.xlsx` claims summary for each invoice: date, run, name, charge, balance, and the 30-day prompt-pay amount (65% of the balance).
+4. Writes one PDF per invoice next to the input, each with its invoice on top and the 1500s in invoice line order. From the 10/28/2026 batch on, each group is split by date of service: `-A` for DOS 10/5/2026 and later, `-B` for DOS 10/4/2026 and earlier, giving `<name>-NBC-A.pdf`, `<name>-NBC-B.pdf`, `<name>-TX-A.pdf`, `<name>-TX-B.pdf`, `<name>-911-A.pdf` and `<name>-911-B.pdf`. Earlier batches write `<name>-NBC.pdf`, `<name>-TX.pdf` and `<name>-911.pdf`.
+5. Writes a matching `.xlsx` claims summary for each invoice PDF: date, run, name, charge, balance, and the 30-day prompt-pay amount (65% of the balance).
 
 Signing in uses your own Microsoft work account. The tool sends nothing anywhere except to Power BI and, for updates, to GitHub.
 
