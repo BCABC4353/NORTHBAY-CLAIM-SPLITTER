@@ -16,7 +16,7 @@ WAIT_SECONDS = 600
 POLL_SECONDS = 10
 START_TOLERANCE_SECONDS = 10
 
-SUFFIX_ORDER = ("NBC", "TX", "911")
+SUFFIX_ORDER = ("NBC-A", "NBC-B", "TX-A", "TX-B", "911-A", "911-B", "NBC", "TX", "911")
 
 APP_DATA_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "NorthBay Claim Splitter"

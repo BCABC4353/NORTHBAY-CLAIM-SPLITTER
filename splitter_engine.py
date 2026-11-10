@@ -13,7 +13,7 @@ from invoice_pdf import InvoicePdfError, read_sections
 from invoice_xlsx import build_summary
 from pbi_client import InvoiceLine, PbiClient, RunInfo
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 logger = logging.getLogger(__name__)
 

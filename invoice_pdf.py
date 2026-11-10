@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 import fitz
 
-_INVOICE = re.compile(r"\d{8}[A-Z0-9]+")
+_INVOICE = re.compile(r"\d{8}[A-Z0-9]+(?:-[AB])?")
 _RUN = re.compile(r"\d{2}-\d+")
 RUN_X_MIN = 70
 RUN_X_MAX = 125
